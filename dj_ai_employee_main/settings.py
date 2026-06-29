@@ -129,3 +129,6 @@ STATIC_URL = 'static/'
 LOGIN_REDIRECT_URL = '/orders/'
 LOGOUT_REDIRECT_URL = '/login/'
 LOGIN_URL = '/login' 
+
+OPENAI_API_KEY = os.getenv("OPENAI_APIKEY")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL")
