@@ -221,6 +221,7 @@
     .agent-message{
         background: #f3f4f6;
         border-radius: 0 10px 10px 10px;
+        white-space: pre-line;
     }
 
     #chat-box.visible{
@@ -326,9 +327,26 @@
 
         <!-- chat area -->
         <div id="chat-messages" class="chat-messages p-3 d-flex flex-column gap-2">
+            {% if conversation %}
+
+            {% for msg in previous_messages %}
+              {% if msg.role == 'user' %}
+                <div class="customer-message p-2 px-3" style="font-size: 13px; max-width: 85%;">
+                  {{msg.content}}
+                </div>
+              {% else %}
+                <div class="agent-message p-2 px-3" style="font-size: 13px; max-width: 85%;">
+                  {{msg.content}}
+                </div>
+              {% endif %}
+            {% endfor %}
+            {% else %}
+
+
             <div class="agent-message p-2 px-3" style="font-size: 13px; max-width: 85%;">
-                Hi user, I'm Handler, How can I help you with your order today?
+                Hi {{request.user.first_name}}, I'm Handler, How can I help you with your order today?
             </div>
+            {% endif %}
         </div>
 
         <div class="card-footer d-flex">
@@ -345,6 +363,20 @@
 
 <script>
 
+    function showTyping(){
+      const messages = document.getElementById("chat-messages");
+      messages.insertAdjacentHTML("beforeend", `
+      <div id ="typing-indicator" class = "agent-message p-2" style="font-size:13px; max-width:82%">
+        Typing...
+        </div>
+      `)
+      messages.scrollTop = messages.scrollHeight;
+    }
+
+    function hideTyping(){
+      document.getElementById("typing-indicator").remove()
+    }
+
     function appendMessage(text, type){
         const messages = document.getElementById("chat-messages")
 
@@ -356,9 +388,10 @@
         div.innerText = text
 
         messages.appendChild(div);
+        messages.scrollTop = messages.scrollHeight;
     }
 
-    function sendMessage(){
+    async function sendMessage(){
         const input = document.getElementById('chat-input');
         const message = input.value.trim();
 
@@ -367,6 +400,32 @@
         appendMessage(message,"customer")
 
         input.value = ""
+        input.disabled = true
+        const typingTimeout = setTimeout(() => showTyping(), 1000)
+
+
+
+        try{
+          const response = await fetch("/support/chat/{{order.id}}/", {
+            method : "POST",
+            headers : {
+              "Content-Type" : "application/json",
+              "x-CSRFToken" : "{{ csrf_token }}"
+            },
+            body : JSON.stringify({message: message})
+          })
+          const data = await response.json()
+          hideTyping()
+          input.disabled = false;
+          input.focus()
+          appendMessage(data.reply, 'agent')
+        }catch(error){
+          consle.error("Error: ", error)
+          appendMessage("Sorry, something went wrong", 'agent')
+        } finally{
+          clearTimeout(typingTimeout);
+          hideTyping();
+        }
     }
 
     document.getElementById("chat-input").addEventListener("keydown", function(e){

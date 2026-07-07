@@ -1,8 +1,10 @@
 import os
 from openai import OpenAI
 from django.conf import settings
-from .tools import *
 
+from support.models import Conversation
+from .tools import *
+import json
 client = OpenAI(api_key=settings.OPENAI_API_KEY)
 openai_model = settings.OPENAI_MODEL
 
@@ -22,9 +24,18 @@ Your personality:
 - Friendly and professional
 - Patient even when customer is angry
 - Clear and concise in your replies
+- keep hi message reply simple 
 
 Important rules:
-- Always check order detials first before responding
+Use tools only when they are needed to answer the user's request.
+
+Do not call any tool for simple greetings such as "Hi", "Hello", or "Hey".
+
+Only check order details if the user explicitly asks about their order, delivery, status, warranty, return, refund, replacement, or provides an order number.
+
+If the user's message is only a greeting, reply with a short greeting such as:
+"Hi! How can I help you today?"
+Do not mention orders, refunds, tools, or your capabilities.
 - Never approve or deny a refund yourself
 - If refund decision is needed - tell customer you are checking with your team
 
@@ -34,62 +45,67 @@ Important rules:
 # SUPPORT TOOLS --> Tools schemas
 SUPPORT_TOOLS = [
     {
-        "name" : "get_order_details",
-        "description" : "fetch complete order details including status, carrier, tracking number and days since order was placed. use this when customer mentions their order or complains about delivery.",
-        "input_schema" : {
-            "type" : "object",
-            "properties" : {
-                "order_id" : {
-                    "type" : "integer",
-                    "description" : "The order ID to look up"
+        "type": "function",
+        "name": "get_order_details",
+        "description": (
+            "Fetch complete order details including status, carrier, "
+            "tracking number, and days since the order was placed. "
+            "Use this when the customer mentions their order or asks "
+            "about delivery."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "order_id": {
+                    "type": "integer",
+                    "description": "The order ID to look up"
                 }
             },
-            "required" : ["order_id"]
+            "required": ["order_id"]
         }
     },
     {
         "type": "function",
-        "function": {
-            "name": "get_refund_history",
-            "description": "Retrieve the refund request history for a user. Returns the total number of refund requests along with details such as order ID, product name, refund reason, current status, and request date.",
-            "parameters": {
+        "name": "get_refund_history",
+        "description": (
+            "Retrieve the refund request history for a user. "
+            "Returns the total number of refund requests along with "
+            "details such as order ID, product name, refund reason, "
+            "current status, and request date."
+        ),
+        "parameters": {
             "type": "object",
             "properties": {
                 "user_id": {
-                "type": "integer",
-                "description": "The unique ID of the user whose refund history should be retrieved."
+                    "type": "integer",
+                    "description": "The unique ID of the user."
                 }
             },
-            "required": [
-                "user_id"
-            ],
+            "required": ["user_id"],
             "additionalProperties": False
-            }
         }
     },
     {
         "type": "function",
-        "function": {
-            "name": "check_delivery_status",
-            "description": "Retrieve the current delivery status of a shipment using its tracking number and carrier. Returns the shipment status, last known location, latest tracking update, estimated delivery date, and any delay reason if available. Use this when csutomer complains about delayed or missing delivery",
-            "parameters": {
+        "name": "check_delivery_status",
+        "description": (
+            "Retrieve the current delivery status of a shipment using "
+            "its tracking number and carrier."
+        ),
+        "parameters": {
             "type": "object",
             "properties": {
                 "tracking_number": {
-                "type": "string",
-                "description": "The shipment tracking number provided by the carrier."
+                    "type": "string",
+                    "description": "Shipment tracking number."
                 },
                 "carrier": {
-                "type": "string",
-                "description": "The shipping carrier handling the package (e.g., FedEx, UPS, DHL, USPS)."
+                    "type": "string",
+                    "description": "Shipping carrier."
                 }
             },
-            "required": [
-                "tracking_number",
-                "carrier"
-            ],
+            "required": ["tracking_number", "carrier"],
             "additionalProperties": False
-            }
         }
     }
 ]
@@ -111,3 +127,51 @@ def execute_tool(tool_name, tool_input):
 
 
 #Agent Loop
+def run_support_agent(user_message, conversation_id, order_id, user_id):
+    conv = Conversation.objects.get(id = conversation_id)
+
+    conversation_messages = []
+    for msg in conv.messages.order_by("created_at"):
+        conversation_messages.append({
+            "role" : msg.role,
+            "content" : msg.content
+        })
+
+    
+    response = client.responses.create(
+        model=openai_model,
+        instructions=SUPPPORT_SYSTEM_PROMPT + f"\n\nContext: This conversation is about order #{order_id}, user: {user_id}",
+        tools=SUPPORT_TOOLS,
+        input=conversation_messages,
+    )
+
+    while True:
+
+        tool_outputs = []
+
+        for item in response.output:
+
+            if item.type == "message":
+                return item.content[0].text
+
+            elif item.type == "function_call":
+                print(item.name)
+                print(item.arguments)
+                print("=============================")
+                result = execute_tool(item.name, json.loads(item.arguments))
+
+                tool_outputs.append({
+                    "type": "function_call_output",
+                    "call_id": item.call_id,
+                    "output": json.dumps(result)
+                })
+
+        if not tool_outputs:
+            break
+
+        response = client.responses.create(
+            model=openai_model,
+            previous_response_id=response.id,
+            input=tool_outputs,
+        )
+
