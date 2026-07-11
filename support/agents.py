@@ -19,6 +19,8 @@ Your responsibilities:
 - Check order detials when customer mentions their order
 - Check refund history before making any refund decisions
 - Be empathetic but honest
+- you dont have permision to respond to refund escalate it to manager 
+- any talks related refund or money just call the manager
 
 Your personality:
 - Friendly and professional
@@ -27,6 +29,11 @@ Your personality:
 - keep hi message reply simple 
 
 Important rules:
+Scope of Support:
+- You only assist customers with CoolBreeze AC products and their orders.
+- You can help with orders, deliveries, refunds, replacements, warranties, cancellations, and related support issues.
+- If a user asks about anything outside these topics, politely explain that you can only assist with CoolBreeze AC customer support and ask them to contact the appropriate service or ask an order-related question.
+- Do not answer general knowledge, programming, mathematics, politics, sports, entertainment, travel, or other unrelated questions.
 Use tools only when they are needed to answer the user's request.
 
 Do not call any tool for simple greetings such as "Hi", "Hello", or "Hey".
@@ -36,9 +43,42 @@ Only check order details if the user explicitly asks about their order, delivery
 If the user's message is only a greeting, reply with a short greeting such as:
 "Hi! How can I help you today?"
 Do not mention orders, refunds, tools, or your capabilities.
-- Never approve or deny a refund yourself
-- If refund decision is needed - tell customer you are checking with your team
 
+If a refund decision is required, use the escalate_to_manager tool after gathering all required information. Wait for the tool's response before replying to the customer.
+
+# """
+
+# SUPPPORT_SYSTEM_PROMPT = """
+# You are Handler, a customer support agent at CoolBreeze AC.
+
+# Responsibilities:
+# - Help customers with their orders.
+# - Use tools whenever information is required.
+# - You cannot approve or reject refunds.
+# - If a refund or business decision is required, use the escalate_to_manager tool.
+# - Respond politely and concisely.
+# """
+
+MANAGER_SYSTEM_PROMPT = """
+You are a senior support manager at CoolBreeze AC.
+A support agent has escalated a customer case to you for a refund decision.
+
+Your responsibilities:
+- Review the case summary carefully
+- Consider the customer's refund history
+- Make a fair and final refund decision
+- Give a clear reason for your decision
+
+Your decision options:
+- Approve refund — if the case is genuine and within policy
+- Deny refund — if the case is suspicious or outside policy
+- Escalate to risk team — if you suspect fraud
+
+Important rules:
+- Be fair but firm
+- Base decision on facts — not emotions
+- Always give a specific reason for your decision
+- Keep your response concise and professional
 """
 
 
@@ -107,7 +147,26 @@ SUPPORT_TOOLS = [
             "required": ["tracking_number", "carrier"],
             "additionalProperties": False
         }
-    }
+    },
+    {
+        "type": "function",
+        "name": "escalate_to_manager",
+        "description": (
+            "Escalate the case to manager for refund decision. Use this when customer requests a refund or compenstaion. Prepare a detailed case summary including order details, refund history and customer complant before escalating"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "case_summary": {
+                    "type": "string",
+                    "description": "Complete case summary including order details, refund history and customer complaint"
+                },
+                
+            },
+            "required": ["case_summary"],
+            "additionalProperties": False
+        }
+    },
 ]
 
 
@@ -115,6 +174,7 @@ SUPPORT_TOOLS = [
 
 #execute_tool() --> bridge between model and tools
 def execute_tool(tool_name, tool_input):
+    print(tool_name,tool_input)
     if tool_name == "get_order_details":
         return get_order_details(tool_input["order_id"])
     
@@ -123,6 +183,13 @@ def execute_tool(tool_name, tool_input):
     
     if tool_name == "check_delivery_status":
         return check_delivery_status(tool_input["tracking_number"], tool_input["carrier"])
+    
+    if tool_name == "escalate_to_manager":
+        case_summary = tool_input["case_summary"]
+        print('escalating to manager ==================', case_summary)
+        decision = run_manager_agent(case_summary)
+        print("decsion=======> ", decision)
+        return decision
 
 
 
@@ -140,6 +207,7 @@ def run_support_agent(user_message, conversation_id, order_id, user_id):
     
     response = client.responses.create(
         model=openai_model,
+        max_output_tokens=2000,
         instructions=SUPPPORT_SYSTEM_PROMPT + f"\n\nContext: This conversation is about order #{order_id}, user: {user_id}",
         tools=SUPPORT_TOOLS,
         input=conversation_messages,
@@ -150,14 +218,11 @@ def run_support_agent(user_message, conversation_id, order_id, user_id):
         tool_outputs = []
 
         for item in response.output:
-
             if item.type == "message":
                 return item.content[0].text
 
             elif item.type == "function_call":
-                print(item.name)
-                print(item.arguments)
-                print("=============================")
+                print(item.name, item.arguments)
                 result = execute_tool(item.name, json.loads(item.arguments))
 
                 tool_outputs.append({
@@ -175,3 +240,43 @@ def run_support_agent(user_message, conversation_id, order_id, user_id):
             input=tool_outputs,
         )
 
+
+def run_manager_agent(case_summary):
+    manager_messages = [
+        {"role":"user", "content": case_summary} #user is task giver
+    ]
+
+    response = client.responses.create(
+        model = openai_model,
+        max_output_tokens=2000,
+        instructions = MANAGER_SYSTEM_PROMPT,
+        input =  manager_messages
+    )
+
+    while True:
+
+        tool_outputs = []
+
+        for item in response.output:
+            if item.type == "message":
+                return item.content[0].text
+            
+            elif item.type == "function_call":
+                print(item.name, item.arguments)
+                result = execute_tool(item.name, json.loads(item.arguments))
+
+                tool_outputs.append({
+                    "type": "function_call_output",
+                    "call_id": item.call_id,
+                    "output": json.dumps(result)
+                })
+
+        if not tool_outputs:
+            break
+
+        response = client.responses.create(
+            # max_output_tokens=2000,
+            model=openai_model,
+            previous_response_id=response.id,
+            input=tool_outputs,
+        )
