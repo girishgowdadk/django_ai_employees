@@ -5,6 +5,7 @@ from django.conf import settings
 from support.models import Conversation
 from .tools import *
 import json
+from support.models import AgentLog
 client = OpenAI(api_key=settings.OPENAI_API_KEY)
 openai_model = settings.OPENAI_MODEL
 
@@ -17,10 +18,17 @@ You help customers with issues related to theie AC orders
 Your responsibilities:
 - Always use your tools to gather facts before responding
 - Check order detials when customer mentions their order
-- Check refund history before making any refund decisions
 - Be empathetic but honest
-- you dont have permision to respond to refund escalate it to manager 
-- any talks related refund or money just call the manager
+- Refund Handling:
+- If the customer requests a refund, you MUST call the manager tool before responding.
+- Do not decide or promise a refund yourself.
+- After receiving the manager's response, explain it to the customer.
+
+- If the customer is only asking about:
+  - the refund policy,
+  - the status of an existing refund,
+  - whether a refund is available,
+  - or any general question about refunds,
 
 Your personality:
 - Friendly and professional
@@ -31,22 +39,14 @@ Your personality:
 Important rules:
 Scope of Support:
 - You only assist customers with CoolBreeze AC products and their orders.
+- you are only allowed to answer the questions about coolBreeze
 - You can help with orders, deliveries, refunds, replacements, warranties, cancellations, and related support issues.
 - If a user asks about anything outside these topics, politely explain that you can only assist with CoolBreeze AC customer support and ask them to contact the appropriate service or ask an order-related question.
 - Do not answer general knowledge, programming, mathematics, politics, sports, entertainment, travel, or other unrelated questions.
-Use tools only when they are needed to answer the user's request.
 
-Do not call any tool for simple greetings such as "Hi", "Hello", or "Hey".
-
-Only check order details if the user explicitly asks about their order, delivery, status, warranty, return, refund, replacement, or provides an order number.
-
-If the user's message is only a greeting, reply with a short greeting such as:
-"Hi! How can I help you today?"
-Do not mention orders, refunds, tools, or your capabilities.
-
-If a refund decision is required, use the escalate_to_manager tool after gathering all required information. Wait for the tool's response before replying to the customer.
 
 # """
+
 
 # SUPPPORT_SYSTEM_PROMPT = """
 # You are Handler, a customer support agent at CoolBreeze AC.
@@ -81,6 +81,31 @@ Important rules:
 - Keep your response concise and professional
 """
 
+
+RISK_SYSTEM_PROMPT = """
+You are a fraud risk analyst at CoolBreeze AC.
+A support manager has sent you a customer profile for risk assessment.
+
+Your job:
+- Analyse the customer's order and refund patterns
+- Identify suspicious behaviour
+- Return a clear risk verdict
+
+Risk levels:
+- LOW — genuine customer, normal behaviour
+- MEDIUM — some suspicious signals, proceed with caution
+- HIGH — clear fraud pattern, recommend denial
+
+Your response format:
+- Risk Level: LOW / MEDIUM / HIGH
+- Key Signals: what you found suspicious or genuine
+- Recommendation: what manager should do
+
+Important:
+- Be objective — base verdict on data only
+- One bad refund does not make someone fraudulent
+- Look for patterns — not isolated incidents
+"""
 
 # SUPPORT TOOLS --> Tools schemas
 SUPPORT_TOOLS = [
@@ -152,7 +177,7 @@ SUPPORT_TOOLS = [
         "type": "function",
         "name": "escalate_to_manager",
         "description": (
-            "Escalate the case to manager for refund decision. Use this when customer requests a refund or compenstaion. Prepare a detailed case summary including order details, refund history and customer complant before escalating"
+            "consult the manager incase of refund for customer. Use this when customer requests a refund or compenstaion. Prepare a detailed case summary including order details, refund history and customer complant before escalating"
         ),
         "parameters": {
             "type": "object",
@@ -169,11 +194,55 @@ SUPPORT_TOOLS = [
     },
 ]
 
+MANAGER_TOOLS = [
+    {
+        "type": "function",
+        "name": "assess_fraud_risk",
+        "description": (
+                "Consult the risk agent to assess fraud risk for a customer. Use this when refund request looks suspicious or customer has multiple refund requests. Pass the user_id to get a risk verdict."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "user_id": {
+                    "type": "integer",
+                    "description": "The user ID to assess fraud risk for"
+                }
+                
+            },
+            "required": ["user_id"],
+            "additionalProperties": False
+        }
+    },
+]
+
+RISK_TOOLS = [
+    {
+        "type": "function",
+        "name": "get_customer_risk_profile",
+        "description": (
+            "Get complete risk profile for a customer including order history, refund patterns and ratio. Use this to assess fraud risk."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "user_id": {
+                    "type": "integer",
+                    "description": "The user ID to assess risk for"
+                }
+                
+            },
+            "required": ["user_id"],
+            "additionalProperties": False
+        }
+    },
+]
+
 
 
 
 #execute_tool() --> bridge between model and tools
-def execute_tool(tool_name, tool_input):
+def execute_tool(tool_name, tool_input,converstion_id = None):
     print(tool_name,tool_input)
     if tool_name == "get_order_details":
         return get_order_details(tool_input["order_id"])
@@ -186,11 +255,18 @@ def execute_tool(tool_name, tool_input):
     
     if tool_name == "escalate_to_manager":
         case_summary = tool_input["case_summary"]
-        print('escalating to manager ==================', case_summary)
-        decision = run_manager_agent(case_summary)
-        print("decsion=======> ", decision)
+        decision = run_manager_agent(case_summary,converstion_id)
+        # print("decsion=======> ", decision)
         return decision
-
+    
+    if(tool_name == "assess_fraud_risk"):
+        user_id = tool_input['user_id']
+        verdict = run_risk_agent(user_id, converstion_id)
+        # print("risk verdict ===>", verdict)
+        return verdict
+    
+    if tool_name == "get_customer_risk_profile":
+        return get_customer_risk_profile(tool_input["user_id"])
 
 
 #Agent Loop
@@ -204,7 +280,7 @@ def run_support_agent(user_message, conversation_id, order_id, user_id):
             "content" : msg.content
         })
 
-    
+    print("calling support")
     response = client.responses.create(
         model=openai_model,
         max_output_tokens=2000,
@@ -216,14 +292,20 @@ def run_support_agent(user_message, conversation_id, order_id, user_id):
     while True:
 
         tool_outputs = []
+        final_message = None
 
         for item in response.output:
-            if item.type == "message":
-                return item.content[0].text
 
-            elif item.type == "function_call":
-                print(item.name, item.arguments)
-                result = execute_tool(item.name, json.loads(item.arguments))
+            if item.type == "function_call":
+                AgentLog.objects.create(conversation = conv,event_type = "tool_call", message = f"Calling tool {item.name} with {item.arguments}")
+
+                result = execute_tool(
+                    item.name,
+                    json.loads(item.arguments),
+                    conversation_id
+                )
+
+                AgentLog.objects.create(conversation = conv,event_type = "tool_result", message = f"Calling tool {item.name} with {str(result)[:200]}")
 
                 tool_outputs.append({
                     "type": "function_call_output",
@@ -231,39 +313,52 @@ def run_support_agent(user_message, conversation_id, order_id, user_id):
                     "output": json.dumps(result)
                 })
 
-        if not tool_outputs:
-            break
+            elif item.type == "message":
+                AgentLog.objects.create(conversation = conv,event_type = "final", message = item.content[0].text)
+                final_message = item.content[0].text
 
-        response = client.responses.create(
-            model=openai_model,
-            previous_response_id=response.id,
-            input=tool_outputs,
-        )
+        if tool_outputs:
+            print("calling support")
+            response = client.responses.create(
+                model=openai_model,
+                previous_response_id=response.id,
+                input=tool_outputs,
+            )
+            continue
+
+        return final_message
 
 
-def run_manager_agent(case_summary):
+def run_manager_agent(case_summary, converstion_id):
     manager_messages = [
         {"role":"user", "content": case_summary} #user is task giver
     ]
+    conv =Conversation.objects.get(id = converstion_id)
+    AgentLog.objects.create(conversation = conv,event_type = "manager", message = f"case received for review : {case_summary[:200]}")
+    print("calling manager")
 
     response = client.responses.create(
         model = openai_model,
         max_output_tokens=2000,
         instructions = MANAGER_SYSTEM_PROMPT,
+        tools = MANAGER_TOOLS,
         input =  manager_messages
     )
 
     while True:
 
         tool_outputs = []
+        final_message = None
 
         for item in response.output:
-            if item.type == "message":
-                return item.content[0].text
-            
-            elif item.type == "function_call":
-                print(item.name, item.arguments)
-                result = execute_tool(item.name, json.loads(item.arguments))
+
+            if item.type == "function_call":
+                AgentLog.objects.create(conversation = conv,event_type = "manager", message = "consulting risk agent for fraud assessment")    
+                result = execute_tool(
+                    item.name,
+                    json.loads(item.arguments),\
+                    converstion_id
+                )
 
                 tool_outputs.append({
                     "type": "function_call_output",
@@ -271,12 +366,72 @@ def run_manager_agent(case_summary):
                     "output": json.dumps(result)
                 })
 
-        if not tool_outputs:
-            break
+            elif item.type == "message":
+                final_message = item.content[0].text
+                AgentLog.objects.create(conversation = conv,event_type = "manager", message = f"descion : {final_message}") 
 
-        response = client.responses.create(
-            # max_output_tokens=2000,
-            model=openai_model,
-            previous_response_id=response.id,
-            input=tool_outputs,
-        )
+
+        if tool_outputs:
+            print("calling manager")
+            response = client.responses.create(
+                model=openai_model,
+                previous_response_id=response.id,
+                input=tool_outputs,
+            )
+            continue
+        return final_message
+
+def run_risk_agent(user_id, converstion_id):
+    conv = Conversation.objects.get(id = converstion_id)
+    risk_messages = [
+        {"role":"user", "content": f"Please assess the fraud risk for user ID {user_id}, Use your tool to get their profile and return a verdict"} #user is task giver
+    ]
+    AgentLog.objects.create(conversation = conv,event_type = "risk", message = f"starting fraud asessment for user {user_id}") 
+    print("calling risk")
+    response = client.responses.create(
+        model = openai_model,
+        max_output_tokens=2000,
+        instructions = RISK_SYSTEM_PROMPT,
+        tools = RISK_TOOLS,
+        input =  risk_messages
+    )
+
+    while True:
+
+        tool_outputs = []
+        final_message = None
+
+        for item in response.output:
+
+            if item.type == "function_call":
+                AgentLog.objects.create(conversation = conv,event_type = "risk", message = f"Calling {item.name} to get risk profile") 
+
+                result = execute_tool(
+                    item.name,
+                    json.loads(item.arguments),
+                    converstion_id
+                )
+
+                tool_outputs.append({
+                    "type": "function_call_output",
+                    "call_id": item.call_id,
+                    "output": json.dumps(result)
+                })
+
+            elif item.type == "message":
+                final_message = item.content[0].text
+                AgentLog.objects.create(conversation = conv,event_type = "risk", message = f"descion : {final_message}") 
+
+
+        if tool_outputs:
+            print("calling risk")
+            response = client.responses.create(
+                model=openai_model,
+                previous_response_id=response.id,
+                input=tool_outputs,
+            )
+            continue
+    
+
+        return final_message
+
