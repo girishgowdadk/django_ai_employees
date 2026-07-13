@@ -6,6 +6,7 @@ from support.models import Conversation
 from .tools import *
 import json
 from support.models import AgentLog
+from .event_queue import *
 client = OpenAI(api_key=settings.OPENAI_API_KEY)
 openai_model = settings.OPENAI_MODEL
 
@@ -300,6 +301,8 @@ def run_support_agent(user_message, conversation_id, order_id, user_id):
         for item in response.output:
 
             if item.type == "function_call":
+                event = {"type": "tool_call", "message" : f"Calling tool {item.name} with {item.arguments}"}
+                publish(conversation_id,event)
                 AgentLog.objects.create(conversation = conv,event_type = "tool_call", message = f"Calling tool {item.name} with {item.arguments}")
 
                 result = execute_tool(
@@ -307,7 +310,8 @@ def run_support_agent(user_message, conversation_id, order_id, user_id):
                     json.loads(item.arguments),
                     conversation_id
                 )
-
+                event = {"type": "tool_result", "message" : f"Calling tool {item.name} with {str(result)[:200]}"}
+                publish(conversation_id,event)
                 AgentLog.objects.create(conversation = conv,event_type = "tool_result", message = f"Calling tool {item.name} with {str(result)[:200]}")
 
                 tool_outputs.append({
@@ -317,8 +321,13 @@ def run_support_agent(user_message, conversation_id, order_id, user_id):
                 })
 
             elif item.type == "message":
+
                 AgentLog.objects.create(conversation = conv,event_type = "final", message = item.content[0].text)
                 final_message = item.content[0].text
+                event = {"type": "final", "message" : final_message}
+                publish(conversation_id,event)
+                publish(conversation_id,DONE)
+
 
         if tool_outputs:
             print("calling support")
@@ -337,6 +346,8 @@ def run_manager_agent(case_summary, converstion_id):
         {"role":"user", "content": case_summary} #user is task giver
     ]
     conv =Conversation.objects.get(id = converstion_id)
+    event = {"type": "manager", "message" :f"case received for review : {case_summary[:200]}"}
+    publish(converstion_id,event)
     AgentLog.objects.create(conversation = conv,event_type = "manager", message = f"case received for review : {case_summary[:200]}")
     print("calling manager")
 
@@ -356,6 +367,8 @@ def run_manager_agent(case_summary, converstion_id):
         for item in response.output:
 
             if item.type == "function_call":
+                event = {"type": "manager", "message" : "consulting risk agent for fraud assessment"}
+                publish(converstion_id,event)
                 AgentLog.objects.create(conversation = conv,event_type = "manager", message = "consulting risk agent for fraud assessment")    
                 result = execute_tool(
                     item.name,
@@ -371,6 +384,8 @@ def run_manager_agent(case_summary, converstion_id):
 
             elif item.type == "message":
                 final_message = item.content[0].text
+                event = {"type": "manager", "message" :final_message}
+                publish(converstion_id,event)
                 AgentLog.objects.create(conversation = conv,event_type = "manager", message = f"descion : {final_message}") 
 
 
@@ -389,6 +404,8 @@ def run_risk_agent(user_id, converstion_id):
     risk_messages = [
         {"role":"user", "content": f"Please assess the fraud risk for user ID {user_id}, Use your tool to get their profile and return a verdict"} #user is task giver
     ]
+    event = {"type": "risk", "message" :f"starting fraud asessment for user {user_id}"}
+    publish(converstion_id,event)
     AgentLog.objects.create(conversation = conv,event_type = "risk", message = f"starting fraud asessment for user {user_id}") 
     print("calling risk")
     response = client.responses.create(
@@ -407,6 +424,8 @@ def run_risk_agent(user_id, converstion_id):
         for item in response.output:
 
             if item.type == "function_call":
+                event = {"type": "risk", "message" :f"Calling {item.name} to get risk profile"}
+                publish(converstion_id,event)
                 AgentLog.objects.create(conversation = conv,event_type = "risk", message = f"Calling {item.name} to get risk profile") 
 
                 result = execute_tool(
@@ -423,6 +442,8 @@ def run_risk_agent(user_id, converstion_id):
 
             elif item.type == "message":
                 final_message = item.content[0].text
+                event = {"type": "risk", "message" :f"descion : {final_message}"}
+                publish(converstion_id,event)
                 AgentLog.objects.create(conversation = conv,event_type = "risk", message = f"descion : {final_message}") 
 
 
