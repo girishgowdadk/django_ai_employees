@@ -137,3 +137,8 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL")
 
 
 STATICFILES_STORAGE = 'whitenoise.storage.StaticFilesStorage'
+
+
+CSRF_TRUSTED_ORIGINS = {
+    "https://djangoaiemployees-production-3896.up.railway.app"
+}
