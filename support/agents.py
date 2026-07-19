@@ -196,6 +196,30 @@ SUPPORT_TOOLS = [
             "additionalProperties": False
         }
     },
+    {
+        "type": "function",
+        "name": "search_knowledge_base",
+        "description": (
+            "Search the company knowledge base for information related to refund policies, "
+        "warranty terms, product FAQs, troubleshooting guides, shipping policies, "
+        "and other support documentation. Use this tool whenever the user's question "
+        "requires factual information that should come from the knowledge base. "
+        "Base your response only on the retrieved information. If no relevant "
+        "information is found, state that the knowledge base does not contain the answer."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Complete case summary including order details, refund history and customer complaint"
+                },
+                
+            },
+            "required": ["query"],
+            "additionalProperties": False
+        }
+    },
 ]
 
 MANAGER_TOOLS = [
@@ -271,6 +295,12 @@ def execute_tool(tool_name, tool_input,converstion_id = None):
     
     if tool_name == "get_customer_risk_profile":
         return get_customer_risk_profile(tool_input["user_id"])
+    
+    if tool_name == "search_knowledge_base":
+        print("calling rag")
+        return search_knowledge_base(tool_input["query"])
+    
+    
 
 
 #Agent Loop
